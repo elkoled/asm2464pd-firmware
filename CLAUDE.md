@@ -22,7 +22,7 @@ Using the proxy:
 We have a proxy to run the firmware in an emulator while we proxy MMIO reads and write.
 
 Flash it with:
-make -C clean flash-proxy
+make -C proxy flash-proxy
 
 Run it with:
 PYTHONUNBUFFERED=1 python3 emulate/emu.py --proxy --proxy-debug 2 fw_tinygrad.bin | tee /tmp/trace
