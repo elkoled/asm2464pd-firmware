@@ -42,6 +42,49 @@ static uint8_t is_usb2;
 /* Streaming PCIe state — configured via 0xF0 control message */
 static uint32_t dma_dwords;    /* total dwords remaining for streaming transfer */
 
+#define STREAM_READY_LO XDATA_REG8(0xB800)
+#define STREAM_READY_HI XDATA_REG8(0xB801)
+#define STREAM_DONE_LO  XDATA_REG8(0xB804)
+#define STREAM_DONE_HI  XDATA_REG8(0xB805)
+
+static uint16_t stream_seq;
+static uint8_t stream_enabled;
+static uint8_t stream_pending;
+static uint8_t stream_waiting;
+static uint8_t stream_error;
+
+static void stream_signal(void) {
+  uint16_t seq;
+  if (!stream_enabled || !stream_pending) return;
+  seq = ++stream_seq;
+  STREAM_READY_LO = (uint8_t)seq;
+  STREAM_READY_HI = (uint8_t)(seq >> 8);
+  stream_pending = 0;
+  stream_waiting = 1;
+}
+
+static uint8_t stream_wait(void) {
+  uint32_t timeout = 500000;
+  if (!stream_enabled || !stream_waiting) return 1;
+
+  while ((STREAM_DONE_LO != (uint8_t)stream_seq || STREAM_DONE_HI != (uint8_t)(stream_seq >> 8)) && --timeout) { }
+  stream_waiting = 0;
+  if (timeout) return 1;
+  stream_enabled = 0;
+  stream_error = 1;
+  return 0;
+}
+
+static void stream_start(void) {
+  stream_seq = 0;
+  stream_pending = 0;
+  stream_waiting = 0;
+  stream_error = 0;
+  STREAM_READY_LO = STREAM_READY_HI = 0;
+  STREAM_DONE_LO = STREAM_DONE_HI = 0;
+  stream_enabled = 1;
+}
+
 #include "pcie_pio.h"
 #include "pcie_tuning.h"
 #include "i2c.h"
@@ -117,6 +160,7 @@ static void do_usb_bulk_in(void) {
   REG_USB_BULK_IN_LEN_H = nbytes >> 8;
   REG_USB_BULK_IN_LEN_L = nbytes & 0xFF;
   dma_dwords -= chunk;
+  REG_USB_EP_CFG1 = USB_EP_CFG1_ARM_IN;
   REG_USB_EP_CFG2 = USB_EP_CFG2_ARM_IN;
 }
 
@@ -203,6 +247,17 @@ static void handle_usb_control(void) {
       XDATA_REG8(addr) = val;
       if (bank) DPX = 0x00;
       usb_send_zlp();
+    } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF4) {
+      if (wValL) stream_start();
+      else (void)stream_wait();
+      stream_enabled = wValL != 0 && !stream_error;
+      usb_send_zlp();
+    } else if (bmReq == (USB_SETUP_DIR_DEV_TO_HOST | USB_SETUP_TYPE_VENDOR) && bReq == 0xF4) {
+      DESC_BUF[0] = stream_error;
+      usb_send_data(1);
+    } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF5) {
+      stream_signal();
+      usb_send_zlp();
     } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF2) {
       /* 0xF2: SRAM DMA — init DMA engine and arm for bulk transfer.
       *   wValue bit 15 = direction: 0=BULK OUT (host→SRAM), 1=BULK IN (SRAM→host)
@@ -213,6 +268,10 @@ static void handle_usb_control(void) {
       uint16_t sectors = (((uint16_t)(wValH & 0x7F)) << 8) | wValL;
       uint8_t slot_sel = REG_USB_SETUP_WIDX_L;
       uint8_t num_slots = REG_USB_SETUP_WIDX_H;
+      if (!stream_wait()) {
+        usb_send_zlp();
+        return;
+      }
       if (num_slots == 0) num_slots = 1;
       /* DMA_INIT sequence for SRAM DMA */
       REG_NVME_DOORBELL       = 0x0;
@@ -224,6 +283,7 @@ static void handle_usb_control(void) {
       REG_NVME_SECTOR_COUNT_LO = (uint8_t)(sectors & 0xFF);
       REG_NVME_CTRL_STATUS = NVME_CTRL_DMA_START | (bulk_in ? 0 : NVME_CTRL_WRITE_DIR);
       REG_NVME_CMD_PARAM   = slot_sel;
+      if (stream_enabled && !bulk_in) stream_pending = 1;
       usb_send_zlp();
     } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF3) {
       /* 0xF3: PCIe power control.
@@ -233,7 +293,7 @@ static void handle_usb_control(void) {
       } else {
         pcie_power_off();
       }
-      usb_send_zlp();
+      if (!(phase & USB_CTRL_PHASE_STAT_IN)) usb_send_zlp();
     } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF0) {
       /* 0xF0 OUT: PCIe TLP engine.
       *   wValue = fmt_type | (byte_enable << 8)
