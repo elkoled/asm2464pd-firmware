@@ -44,8 +44,12 @@ static uint32_t dma_dwords;    /* total dwords remaining for streaming transfer 
 
 #define STREAM_READY_LO XDATA_REG8(0xB800)
 #define STREAM_READY_HI XDATA_REG8(0xB801)
+#define STREAM_READY_2  XDATA_REG8(0xB802)
+#define STREAM_READY_3  XDATA_REG8(0xB803)
 #define STREAM_DONE_LO  XDATA_REG8(0xB804)
 #define STREAM_DONE_HI  XDATA_REG8(0xB805)
+#define STREAM_DONE_2   XDATA_REG8(0xB806)
+#define STREAM_DONE_3   XDATA_REG8(0xB807)
 
 static uint16_t stream_seq;
 static uint8_t stream_enabled;
@@ -80,8 +84,8 @@ static void stream_start(void) {
   stream_pending = 0;
   stream_waiting = 0;
   stream_error = 0;
-  STREAM_READY_LO = STREAM_READY_HI = 0;
-  STREAM_DONE_LO = STREAM_DONE_HI = 0;
+  STREAM_READY_LO = STREAM_READY_HI = STREAM_READY_2 = STREAM_READY_3 = 0;
+  STREAM_DONE_LO = STREAM_DONE_HI = STREAM_DONE_2 = STREAM_DONE_3 = 0;
   stream_enabled = 1;
 }
 
