@@ -50,16 +50,23 @@ static uint32_t dma_dwords;    /* total dwords remaining for streaming transfer 
 #define STREAM_DONE_HI  XDATA_REG8(0xB805)
 #define STREAM_DONE_2   XDATA_REG8(0xB806)
 #define STREAM_DONE_3   XDATA_REG8(0xB807)
+#define STREAM_SECTORS_HI XDATA_REG8(0xB808)
+#define STREAM_SECTORS_LO XDATA_REG8(0xB809)
+#define STREAM_SLOT       XDATA_REG8(0xB80A)
+#define STREAM_SLOTS      XDATA_REG8(0xB80B)
+#define STREAM_BANK_SLOTS 0x10
 
 static uint16_t stream_seq;
 static uint8_t stream_enabled;
 static uint8_t stream_pending;
 static uint8_t stream_waiting;
 static uint8_t stream_error;
+static uint8_t stream_cyclic;
 
 static void stream_signal(void) {
   uint16_t seq;
   if (!stream_enabled || !stream_pending) return;
+  if (stream_cyclic && stream_seq == 255) stream_seq = 0;
   seq = ++stream_seq;
   STREAM_READY_LO = (uint8_t)seq;
   STREAM_READY_HI = (uint8_t)(seq >> 8);
@@ -68,7 +75,7 @@ static void stream_signal(void) {
 }
 
 static uint8_t stream_wait(void) {
-  uint32_t timeout = 500000;
+  uint32_t timeout = 50000000;
   if (!stream_enabled || !stream_waiting) return 1;
 
   while ((STREAM_DONE_LO != (uint8_t)stream_seq || STREAM_DONE_HI != (uint8_t)(stream_seq >> 8)) && --timeout) { }
@@ -79,14 +86,36 @@ static uint8_t stream_wait(void) {
   return 0;
 }
 
-static void stream_start(void) {
+static uint8_t stream_wait_for(uint16_t seq) {
+  uint32_t timeout = 50000000;
+  while ((((uint16_t)STREAM_DONE_HI << 8) | STREAM_DONE_LO) != seq && --timeout) { }
+  if (timeout) return 1;
+  stream_enabled = 0;
+  stream_error = 1;
+  return 0;
+}
+
+static void stream_start(uint8_t cyclic) {
   stream_seq = 0;
   stream_pending = 0;
   stream_waiting = 0;
   stream_error = 0;
   STREAM_READY_LO = STREAM_READY_HI = STREAM_READY_2 = STREAM_READY_3 = 0;
   STREAM_DONE_LO = STREAM_DONE_HI = STREAM_DONE_2 = STREAM_DONE_3 = 0;
+  stream_cyclic = cyclic;
   stream_enabled = 1;
+}
+
+static void stream_arm(void) {
+  REG_NVME_DOORBELL       = 0x0;
+  REG_NVME_SECTOR_SIZE_HI = 0x02;
+  REG_NVME_SECTOR_SIZE_LO = 0x00;
+  REG_NVME_SLOT_START = NVME_SLOT_ENABLE | STREAM_SLOT;
+  REG_NVME_SLOT_END   = STREAM_SLOT + STREAM_SLOTS;
+  REG_NVME_SECTOR_COUNT_HI = STREAM_SECTORS_HI;
+  REG_NVME_SECTOR_COUNT_LO = STREAM_SECTORS_LO;
+  REG_NVME_CTRL_STATUS = NVME_CTRL_DMA_START | NVME_CTRL_WRITE_DIR;
+  REG_NVME_CMD_PARAM   = STREAM_SLOT;
 }
 
 #include "pcie_pio.h"
@@ -252,7 +281,7 @@ static void handle_usb_control(void) {
       if (bank) DPX = 0x00;
       usb_send_zlp();
     } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF4) {
-      if (wValL) stream_start();
+      if (wValL) stream_start(wValL == 1);
       else (void)stream_wait();
       stream_enabled = wValL != 0 && !stream_error;
       usb_send_zlp();
@@ -260,7 +289,23 @@ static void handle_usb_control(void) {
       DESC_BUF[0] = stream_error;
       usb_send_data(1);
     } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF5) {
+      uint8_t completed = wValL != 3 || !stream_seq || stream_wait_for(stream_seq);
       stream_signal();
+      if (wValL && wValL != 3) completed = stream_wait();
+      if (wValL == 1 && completed && stream_enabled) {
+        stream_arm();
+        stream_pending = 1;
+      } else if (wValL == 3 && completed && stream_enabled) {
+        uint16_t sectors = ((uint16_t)REG_USB_SETUP_WIDX_H << 8) | REG_USB_SETUP_WIDX_L;
+        STREAM_SLOT ^= STREAM_BANK_SLOTS;
+        if (sectors) {
+          STREAM_SECTORS_HI = (uint8_t)(sectors >> 8);
+          STREAM_SECTORS_LO = (uint8_t)sectors;
+          STREAM_SLOTS = (uint8_t)((sectors + 31) >> 5);
+        }
+        stream_arm();
+        stream_pending = 1;
+      }
       usb_send_zlp();
     } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF2) {
       /* 0xF2: SRAM DMA — init DMA engine and arm for bulk transfer.
@@ -277,6 +322,10 @@ static void handle_usb_control(void) {
         return;
       }
       if (num_slots == 0) num_slots = 1;
+      STREAM_SECTORS_HI = (uint8_t)(sectors >> 8);
+      STREAM_SECTORS_LO = (uint8_t)sectors;
+      STREAM_SLOT = slot_sel;
+      STREAM_SLOTS = num_slots;
       /* DMA_INIT sequence for SRAM DMA */
       REG_NVME_DOORBELL       = 0x0;
       REG_NVME_SECTOR_SIZE_HI = 0x02;
