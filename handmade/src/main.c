@@ -38,6 +38,12 @@ static void sleep(uint16_t milliseconds) {
   while (!(REG_TIMER0_CSR & TIMER_CSR_EXPIRED));
 }
 
+/* tlp failure tracking, xdata to keep DSEG free */
+volatile __xdata __at(0x0AD4) uint8_t tlp_fail_cnt;   /* bumped on TLP error/timeout, cleared on success */
+volatile __xdata __at(0x0AD5) uint8_t tlp_prev;
+volatile __xdata __at(0x0AD6) uint8_t tlp_strikes;
+volatile __xdata __at(0x0AD7) uint8_t tlp_stage;      /* 0 none, 1 recovered, 2 reset pending */
+
 static uint8_t is_usb2;
 
 /* Streaming PCIe state — configured via 0xF0 control message */
@@ -117,6 +123,35 @@ static void pcie_power_on(void) {
   // green = PCIe link up, red = link down
   bool link_up = (stable_samples >= 3);
   led_set_rgb(!link_up, link_up, false);
+}
+
+/* fire one CfgRd0 at the bridge port and wait bounded, engine health probe */
+static uint8_t pcie_engine_ok(void) {
+  uint16_t t;
+  REG_PCIE_FMT_TYPE = 0x04;
+  REG_PCIE_BYTE_EN  = 0x0F;
+  REG_PCIE_ADDR_0 = 0; REG_PCIE_ADDR_1 = 0; REG_PCIE_ADDR_2 = 0; REG_PCIE_ADDR_3 = 0;
+  REG_PCIE_ADDR_HIGH = 0; REG_PCIE_ADDR_HIGH_1 = 0; REG_PCIE_ADDR_HIGH_2 = 0; REG_PCIE_ADDR_HIGH_3 = 0;
+  REG_PCIE_STATUS  = PCIE_STATUS_ERROR;
+  REG_PCIE_STATUS  = PCIE_STATUS_COMPLETE;
+  REG_PCIE_STATUS  = PCIE_STATUS_KICK;
+  REG_PCIE_TRIGGER = PCIE_TRIGGER_EXEC;
+  for (t = 0; t < 50000; t++) {
+    uint8_t s = REG_PCIE_STATUS;
+    if (s & PCIE_STATUS_ERROR) return 0;
+    if (s & PCIE_STATUS_COMPLETE) return 1;
+  }
+  return 0;
+}
+
+/* full endpoint reset: power down with PERST held, clear the latched
+ * completion error, retrain from scratch */
+static void pcie_tunnel_recover(void) {
+  uint8_t i;
+  pcie_power_off();
+  for (i = 0; i < 5; i++) sleep(100);
+  REG_PCIE_STATUS = PCIE_STATUS_ERROR;
+  pcie_power_on();
 }
 
 static void do_usb_bulk_in(void) {
@@ -235,6 +270,12 @@ static void handle_usb_control(void) {
       REG_NVME_CTRL_STATUS = NVME_CTRL_DMA_START | (bulk_in ? 0 : NVME_CTRL_WRITE_DIR);
       REG_NVME_CMD_PARAM   = slot_sel;
       usb_send_zlp();
+    } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF4) {
+      /* 0xF4: recover a wedged PCIe tunnel. PERST + error clear does not fix
+       * every latch class, verify and schedule a self reset if still dead */
+      pcie_tunnel_recover();
+      if (!pcie_engine_ok()) tlp_stage = 2;
+      usb_send_zlp();
     } else if (bmReq == (USB_SETUP_DIR_HOST_TO_DEV | USB_SETUP_TYPE_VENDOR) && bReq == 0xF3) {
       /* 0xF3: PCIe power control.
        *   wValue low bit 0 = 0 power off, 1 power on. */
@@ -267,6 +308,13 @@ static void handle_usb_control(void) {
           ret_status = 0;
           break;
         }
+      }
+      if (ret_status) {
+        tlp_fail_cnt++;
+      } else {
+        tlp_fail_cnt = 0;
+        tlp_strikes = 0;
+        tlp_stage = 0;
       }
       if (ret_status == 0) {
         DESC_BUF[0] = REG_PCIE_DATA_3;
@@ -382,6 +430,9 @@ void handle_usb_bulk_data(void) {
 
 
 void int0_isr(void) __interrupt(0) {
+  /* main loop may be mid bank1 access (tunnel recover) */
+  uint8_t saved_dpx = DPX;
+  DPX = 0x00;
   uint8_t int0_type = REG_INT_USB_STATUS;
   if (int0_type & INT_USB_GATE) {
     uint8_t periph_status;
@@ -447,6 +498,7 @@ void int0_isr(void) __interrupt(0) {
     uart_puthex(int0_type);
     uart_puts("]\n");
   }
+  DPX = saved_dpx;
 }
 
 void int1_isr(void) __interrupt(1) {
@@ -483,7 +535,35 @@ void main(void) {
   i2c_init();
   ina231_init();
 
+  tlp_fail_cnt = 0;
+  tlp_prev = 0;
+  tlp_strikes = 0;
+  tlp_stage = 0;
+
   while (1) {
-    // DO NOT PUT ANYTHING HERE, EVERYTHING SHOULD BE HANDLED IN INTERRUPTS
+    // DO NOT PUT ANYTHING ELSE HERE, EVERYTHING SHOULD BE HANDLED IN INTERRUPTS
+    /* exception: tunnel recovery needs a non-ISR context. The TLP engine can
+     * latch dead while usb stays up and PERST alone does not clear it,
+     * escalate: recover once, then self reset */
+    sleep(500);
+    if (tlp_stage == 2) {
+      uart_puts("[TLP dead, reset]\n");
+      REG_CPU_RESET = CPU_RESET_TRIGGER;
+      while (1) { }
+    }
+    if (tlp_fail_cnt != tlp_prev) {
+      tlp_prev = tlp_fail_cnt;
+      if (tlp_fail_cnt) tlp_strikes++;
+    } else {
+      tlp_strikes = 0;
+    }
+    if (tlp_strikes >= 4 && tlp_stage == 1) tlp_stage = 2;
+    if (tlp_strikes >= 2 && tlp_stage == 0) {
+      tlp_stage = 1;
+      tlp_strikes = 0;
+      uart_puts("[TLP dead, recover]\n");
+      pcie_tunnel_recover();
+      if (!pcie_engine_ok()) tlp_stage = 2;
+    }
   }
 }

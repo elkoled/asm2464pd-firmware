@@ -46,11 +46,28 @@ static void pcie_read_chunk(__xdata uint8_t *dst, uint16_t cnt) {
     movx  @dptr, a
 
   _pcie_rd_loop:
+    ; bounded poll (~2ms), a completion that never arrives must not wedge the ISR
+    mov   b, #0
+    mov   r2, #16
   _pcie_rd_poll:
     mov   dptr, #0xB296
     movx  a, @dptr
     anl   a, #0x03
-    jz    _pcie_rd_poll
+    jnz   _pcie_rd_ready
+    djnz  b, _pcie_rd_poll
+    djnz  r2, _pcie_rd_poll
+    sjmp  _pcie_rd_fail
+  _pcie_rd_ready:
+    ; error completion also counts as a failure, do not stream garbage
+    jnb   acc.0, _pcie_rd_data
+  _pcie_rd_fail:
+    ; count the failure and abort the chunk
+    mov   dptr, #_tlp_fail_cnt
+    movx  a, @dptr
+    inc   a
+    movx  @dptr, a
+    ljmp  _pcie_rd_done
+  _pcie_rd_data:
 
     ; read all 4 DATA regs (B223 down to B220)
     mov   dptr, #0xB223
