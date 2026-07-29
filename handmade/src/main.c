@@ -84,6 +84,10 @@ static void pcie_power_on(void) {
   REG_TUNNEL_CTRL_B403 = 0x01;                 // fix PCIe link stability
   REG_PCIE_PERST_CTRL  = PCIE_PERST_ASSERT;    // assert PERST#
   REG_TUNNEL_LINK_STATE = 0x00;                // clear tunnel link state
+  REG_PCIE_LTSSM_B455 = 0x02;
+  REG_PCIE_LTSSM_B455 = 0x04;
+  REG_PCIE_CTRL_B2D5 = 0x01;
+  REG_PCIE_STATUS = PCIE_STATUS_RESET;
   DPX = 0x01; REG_PHY_TLP_ROUTING = PHY_TLP_ROUTING_ENABLE; DPX = 0x00;
   bank1_write(0x78AF, 0x4F); bank1_write(0x79AF, 0x4F); // rxphy lane commits
   bank1_write(0x7AAF, 0xCF); bank1_write(0x7BAF, 0xCF);
