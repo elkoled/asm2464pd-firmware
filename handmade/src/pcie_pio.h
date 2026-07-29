@@ -164,6 +164,10 @@ static void pcie_write_chunk(__xdata uint8_t *src, uint16_t cnt) {
     mov   r7, dph
     mov   r4, (_pcie_write_chunk_PARM_2)
     mov   r5, (_pcie_write_chunk_PARM_2 + 1)
+    mov   a, r4
+    orl   a, r5
+    jnz   _pcie_wr_loop
+    ret
 
   _pcie_wr_loop:
     ; read 4 bytes from src

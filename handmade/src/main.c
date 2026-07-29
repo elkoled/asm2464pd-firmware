@@ -375,13 +375,17 @@ void handle_usb_bulk_data(void) {
   uart_puthex(bulk_cfg1); uart_puts(" "); uart_puthex(bulk_cfg2);
   uart_puts("]\n");*/
   if (bulk_cfg1 & USB_EP_CFG1_BULK_OUT_COMPLETE) {
+    uint16_t byte_count = ((uint16_t)REG_USB_BULK_OUT_BC_H << 8) |
+                          REG_USB_BULK_OUT_BC_L;
+    uint16_t dword_count = byte_count >> 2;
+    uint16_t max_bytes = is_usb2 ? 512 : 16384;
     REG_USB_EP_CFG1 = USB_EP_CFG1_BULK_OUT_COMPLETE;
-    uint16_t dword_count = (((uint16_t)REG_USB_BULK_OUT_BC_H << 8) | REG_USB_BULK_OUT_BC_L) >> 2;
-    if (dma_dwords >= dword_count) {
+    if (byte_count && !(byte_count & 3) && byte_count <= max_bytes &&
+        dword_count <= dma_dwords) {
       pcie_write_chunk((__xdata uint8_t *)0x7000, dword_count);
       dma_dwords -= dword_count;
-      if (dma_dwords > 0) REG_USB_EP_CFG2 = USB_EP_CFG2_ARM_OUT; // re-arm OUT
     }
+    if (dma_dwords > 0) REG_USB_EP_CFG2 = USB_EP_CFG2_ARM_OUT; // re-arm OUT
   } else if (bulk_cfg1 & USB_EP_CFG1_BULK_IN_COMPLETE) {
     REG_USB_EP_CFG1 = USB_EP_CFG1_BULK_IN_COMPLETE;
     if (dma_dwords > 0) do_usb_bulk_in();
