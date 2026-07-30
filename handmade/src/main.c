@@ -282,6 +282,10 @@ static void handle_usb_control(void) {
       uint8_t slot_sel = REG_USB_SETUP_WIDX_L;
       uint8_t num_slots = REG_USB_SETUP_WIDX_H;
       if (num_slots == 0) num_slots = 1;
+      /* retire residual engine state from the previous transfer, stock runs this
+       * full resync after every data phase, and ack the chunk-service latch */
+      usb_bulk_engine_abort();
+      REG_USB_MSC_CTRL = 0x01;
       /* DMA_INIT sequence for SRAM DMA */
       REG_NVME_DOORBELL       = 0x0;
       REG_NVME_SECTOR_SIZE_HI = 0x02;
