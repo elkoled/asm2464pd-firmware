@@ -1433,6 +1433,10 @@
 #define   NVME_QUEUE_STATUS_51_MASK 0x1F  // Bits 0-4: Queue status index
 #define REG_DMA_ENTRY           XDATA_REG16(0xC462)
 #define REG_CMDQ_DIR_END        XDATA_REG16(0xC470)
+/* stock slot service (ISR 0x10E5 / helper 0x116E): C471 bit0 = completed slot
+ * pending, read C47A for the slot index, write C47A=0xFF to pop/free it */
+#define REG_NVME_SLOT_PENDING   XDATA_REG8(0xC471)
+#define REG_NVME_SLOT_POP       XDATA_REG8(0xC47A)
 /*
  * NVMe Queue Busy (0xC471)
  * Indicates NVMe command queue is active.
@@ -1457,6 +1461,7 @@
 #define REG_NVME_LINK_PARAM     XDATA_REG8(0xC473)  // NVMe link parameter (bit 4)
 #define REG_NVME_CMD_STATUS_C47A XDATA_REG8(0xC47A) // NVMe command status (used by usb_ep_loop)
 #define REG_NVME_DMA_CTRL_C4E9  XDATA_REG8(0xC4E9)  // NVMe DMA control extended
+#define REG_NVME_TAG_C488       XDATA_REG8(0xC488)  /* stock teardown writes the tag here */
 #define REG_NVME_PARAM_C4EA     XDATA_REG8(0xC4EA)  // NVMe parameter storage
 #define REG_NVME_PARAM_C4EB     XDATA_REG8(0xC4EB)  // NVMe parameter storage high
 /*

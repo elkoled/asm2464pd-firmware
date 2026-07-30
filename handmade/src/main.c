@@ -45,6 +45,7 @@ static uint32_t __xdata usb4_skip_magic;
 
 /* Streaming PCIe state — configured via 0xF0 control message */
 static uint32_t __xdata dma_dwords;    /* total dwords remaining for streaming transfer */
+static uint8_t __xdata slots_outstanding;  /* stock [0x000A]: slots handed off via CE88 */
 
 #include "pcie_pio.h"
 #include "pcie_tuning.h"
@@ -283,9 +284,18 @@ static void handle_usb_control(void) {
       uint8_t num_slots = REG_USB_SETUP_WIDX_H;
       if (num_slots == 0) num_slots = 1;
       /* retire residual engine state from the previous transfer, stock runs this
-       * full resync after every data phase, and ack the chunk-service latch */
+       * full resync after every data phase, and ack the chunk-service latch.
+       * tail ports the stock teardown 0x2D44-0x2D6B with tag 0 */
       usb_bulk_engine_abort();
       REG_USB_MSC_CTRL = 0x01;
+      slots_outstanding = 0;
+      REG_USB_CTRL_924C &= (uint8_t)~0x01;
+      REG_NVME_TAG_C488 = 0x00;
+      REG_NVME_DMA_CTRL_C4E9 = 0x00;
+      REG_SCSI_DMA_PARAM0 = 0x00;
+      REG_SCSI_DMA_PARAM1 = 0x00;
+      REG_SCSI_DMA_PARAM2 = 0x00;
+      REG_SCSI_DMA_PARAM3 = 0x00;
       /* DMA_INIT sequence for SRAM DMA */
       REG_NVME_DOORBELL       = 0x0;
       REG_NVME_SECTOR_SIZE_HI = 0x02;
@@ -615,6 +625,29 @@ void main(void) {
   uint8_t usb4_fallback_ticks = 0;
   uint8_t usb4_usb_inited = 0;
   while (1) {
+    if (!IS_USB4()) {
+      /* stock slot service, fw 0x116E/0x17DB core: pop each completed slot through
+       * the CE88/CE89 handshake and recompute the 924C.0 backpressure bit exactly
+       * like stock. deviation: the CE89 wait is bounded so a dead engine cannot
+       * hang the main loop */
+      if (REG_NVME_SLOT_PENDING & 0x01) {
+        REG_BULK_DMA_HANDSHAKE = REG_NVME_SLOT_POP;
+        { uint16_t g = 0; while (!(REG_USB_DMA_STATE & USB_DMA_STATE_READY) && ++g < 10000); }
+        slots_outstanding++;
+        if (slots_outstanding >= 2) REG_USB_CTRL_924C |= 0x01;
+        else REG_USB_CTRL_924C &= (uint8_t)~0x01;
+        REG_NVME_SLOT_POP = 0xFF;
+      }
+      /* stock chunk service, fw ISR exit 0x1150 -> 0x4781 -> 0x1B15 final chunk
+       * path: on the chunk latch, drop the slot enable, rewrite the window end
+       * and raise start, then ack the latch */
+      if (REG_USB_MSC_CTRL & 0x01) {
+        REG_NVME_SLOT_START &= (uint8_t)~NVME_SLOT_ENABLE;
+        REG_NVME_SLOT_END = REG_NVME_SLOT_END & 0xC0;
+        REG_NVME_CTRL_STATUS = (REG_NVME_CTRL_STATUS & 0xFD) | NVME_CTRL_DMA_START;
+        REG_USB_MSC_CTRL = 0x01;
+      }
+    }
     if (IS_USB4()) {
       /* Poll cc_pd_timer_tick from the main loop when PD hasn't connected yet.
        * The 1s DMA timeout arms the USB4 mode entry fallback for USB3-only hosts
