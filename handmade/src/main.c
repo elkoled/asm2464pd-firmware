@@ -140,6 +140,29 @@ static void do_usb_bulk_in(void) {
 }
 
 
+/* Bulk engine abort, mirrored from stock fw 0x2BF9/0x4E6A: gate the USB core,
+ * bounce the MSC/NVMe engine, then strobe the DMA bridge reset. Stock runs this
+ * on CLEAR_FEATURE(HALT) of the bulk OUT endpoint; without it a mid-transfer
+ * link error leaves the C4xx engine wedged and only SET_CONFIGURATION recovers.
+ * Stock gates this on C450 bit1, but the wedged state reads C450=00 so we run
+ * it unconditionally (clear-halt is only ever sent during error recovery). */
+static void usb_bulk_engine_abort(void) {
+  REG_USB_CTRL_9201 |= USB_CTRL_9201_BIT4;
+  REG_NVME_DOORBELL |= NVME_DOORBELL_BIT0;
+  REG_USB_MSC_CFG   |= USB_MSC_CFG_ENABLE;
+  REG_NVME_DOORBELL |= NVME_DOORBELL_BIT3;
+  REG_USB_CTRL_920F |= USB_CTRL_920F_BIT4;
+  REG_NVME_DOORBELL &= (uint8_t)~NVME_DOORBELL_BIT0;
+  REG_USB_MSC_CFG   &= (uint8_t)~USB_MSC_CFG_ENABLE;
+  REG_NVME_DOORBELL &= (uint8_t)~NVME_DOORBELL_BIT3;
+  REG_USB_CTRL_920F &= (uint8_t)~USB_CTRL_920F_BIT4;
+  REG_USB_CTRL_9201 &= (uint8_t)~USB_CTRL_9201_BIT4;
+  REG_PCIE_TUNNEL_CFG |= PCIE_TLP_CTRL_DMA_RESET;
+  REG_PCIE_TUNNEL_CFG &= (uint8_t)~PCIE_TLP_CTRL_DMA_RESET;
+  // back to bulk bypass mode
+  REG_USB_MSC_CFG = 0x00;
+}
+
 /*=== USB Control Handler ===*/
 
 static void handle_usb_control(void) {
@@ -184,8 +207,12 @@ static void handle_usb_control(void) {
        * wIndex = endpoint address (0x02=OUT, 0x81=IN). */
       uint8_t ep_addr = REG_USB_SETUP_WIDX_L;
       if (ep_addr == 0x02) {
+        // stock order: clear the hw stall bit, clear the endpoint, then abort the engine
+        REG_USB_EP0_CONFIG &= (uint8_t)~USB_EP0_HALT_OUT;
         REG_USB_EP_CFG2 = USB_EP_CFG2_CLEAR_OUT;
+        usb_bulk_engine_abort();
       } else if (ep_addr == 0x81) {
+        REG_USB_EP0_CONFIG &= (uint8_t)~USB_EP0_HALT_IN;
         REG_USB_EP_CFG2 = USB_EP_CFG2_CLEAR_IN;
       }
       dma_dwords = 0;

@@ -255,6 +255,11 @@
 #define REG_USB_EP0_CONFIG      XDATA_REG8(0x9006)
 #define   USB_EP0_CONFIG_ENABLE   0x01  // Bit 0: EP0 config / bulk endpoint ready
 #define   USB_EP0_CONFIG_READY    0x80  // Bit 7: EP0 ready / data transfer ready
+/* Stock GET_STATUS reads these as the bulk endpoint halt bits:
+ * bit 0 = bulk IN (0x81) halted, bit 7 = bulk OUT (0x02) halted.
+ * Stock CLEAR_FEATURE(HALT) clears them before clearing the endpoint. */
+#define   USB_EP0_HALT_IN         0x01
+#define   USB_EP0_HALT_OUT        0x80
 #define REG_USB_SCSI_BUF_LEN    XDATA_REG16(0x9007)
 #define REG_USB_SCSI_BUF_LEN_L  XDATA_REG8(0x9007)
 #define REG_USB_SCSI_BUF_LEN_H  XDATA_REG8(0x9008)
@@ -752,6 +757,8 @@
 #define   USB_CTRL_9200_BIT6     0x40  // Bit 6: USB control enable flag
 #define REG_USB_CTRL_9201       XDATA_REG8(0x9201)
 #define   USB_CTRL_9201_BIT4      0x10  // Bit 4: USB control flag
+#define REG_USB_CTRL_920F       XDATA_REG8(0x920F)  /* stock bulk engine abort toggles bit 4 */
+#define   USB_CTRL_920F_BIT4      0x10
 /*
  * USB Address Control (0x9202)
  * Read-modify-writeback during SET_ADDRESS on USB 3.0.
